@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>FitLab – Schlaf &amp; Rhythmus</title>
+<style>
+:root{
+  --bg:#0e1014; --card:#161a21; --card2:#1c212a; --fg:#e8ebf0; --muted:#8b93a1;
+  --line:#252b35; --accent:#59a5f5; --warn:#e0644a; --good:#54c08a;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+     font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+     font-size:15px;line-height:1.45;padding:14px 14px 48px;max-width:900px;margin:0 auto}
+h1{font-size:20px;margin:0 0 2px}
+h2{font-size:15px;margin:0 0 10px;font-weight:600}
+.sub{color:var(--muted);font-size:12px;margin-bottom:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.kpi{background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.kpi .v{font-size:21px;font-weight:650;letter-spacing:-.02em}
+.kpi .l{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.kpi .n{font-size:11px;color:var(--muted);margin-top:2px}
+svg{display:block;width:100%;height:auto}
+.legend{display:flex;flex-wrap:wrap;gap:10px;font-size:11px;color:var(--muted);margin-top:8px}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--muted);font-weight:500}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.scroll{overflow-x:auto}
+.note{font-size:11px;color:var(--muted);margin-top:8px}
+footer{color:var(--muted);font-size:11px;text-align:center;margin-top:18px}
+button{background:var(--card2);color:var(--fg);border:1px solid var(--line);
+       border-radius:10px;padding:10px 14px;font-size:14px;font-family:inherit}
+button.primary{background:var(--accent);color:#08121e;border-color:transparent;font-weight:600}
+button:active{transform:scale(.99)}
+.drop{border:1.5px dashed var(--line);border-radius:14px;padding:22px 14px;text-align:center}
+.drop.on{border-color:var(--accent);background:#141b25}
+.big{font-size:16px;font-weight:600;margin-bottom:6px}
+.muted{color:var(--muted)}
+.err{color:var(--warn)}
+.ok{color:var(--good)}
+pre{background:#0b0d11;border:1px solid var(--line);border-radius:10px;padding:10px;
+    font-size:11px;overflow-x:auto;white-space:pre-wrap;word-break:break-word}
+#file{display:none}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid var(--line);
+      border-top-color:var(--accent);border-radius:50%;animation:s .8s linear infinite;vertical-align:-2px}
+@keyframes s{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<h1>FitLab</h1>
+<div class="sub">Schlaf, Rhythmus und Aktivität aus der Gadgetbridge-Datenbank auswerten.
+Alles läuft in diesem Browser – die Datei wird nicht hochgeladen.</div>
+
+<div class="card" id="dropzone">
+  <div class="drop" id="drop">
+    <div class="big" id="dropTitle">Datei wählen</div>
+    <div class="muted" id="dropHint">Gadgetbridge-Export: <code>Gadgetbridge.db</code> oder die ZIP-Sicherung</div>
+    <div class="row" style="justify-content:center;margin-top:12px">
+      <button class="primary" id="pick">Datei wählen</button>
+    </div>
+  </div>
+  <input type="file" id="file">
+  <div class="note">Die Datei bleibt auf dem Gerät. Kein Server, kein Upload, keine Netzverbindung außer dem einmaligen Laden dieser Seite.</div>
+</div>
+
+<div id="out"></div>
+
+<footer id="foot">FitLab – offline, ohne Konto, ohne Cloud.</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js"></script>
+<script>
+"use strict";
+
+/* ------------------------------------------------------------------ */
+/* Konstanten                                                          */
+/* ------------------------------------------------------------------ */
+
+const TBL_STATS   = "HUAWEI_SLEEP_STATS_SAMPLE";
+const TBL_STAGES  = "HUAWEI_SLEEP_STAGE_SAMPLE";
+const TBL_ACTIVITY= "HUAWEI_ACTIVITY_SAMPLE";
+const TBL_WORKOUT = "HUAWEI_WORKOUT_SUMMARY_SAMPLE";
+
+// stage int -> [Name, Farbe, Stufe]
+const STAGES = {
+  3:["Tief","#2f6fdb",0],
+  1:["Leicht","#59a5f5",1],
+  5:["Leicht (Nap)","#7fc0ff",1],
+  2:["REM","#9a6ff0",2],
+  4:["Wach","#e0644a",3],
+  0:["Unbekannt","#4a4f5a",1]
+};
+const TARGET_MIN = 480;
+const WINDOW_START = 18*60;   // Actogramm: 18:00 bis 14:00
+const WINDOW_LEN   = 20*60;
+
+/* ------------------------------------------------------------------ */
+/* Helfer                                                              */
+/* ------------------------------------------------------------------ */
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function mean(a){ a = a.filter(v => v !== null && v !== undefined && isFinite(v));
+  if(!a.length) return null; return a.reduce((x,y)=>x+y,0)/a.length; }
+function sum(a){ return a.reduce((x,y)=>x+y,0); }
+function median(a){ a=a.slice().sort((x,y)=>x-y); if(!a.length) return null;
+  const m=a.length>>1; return a.length%2 ? a[m] : (a[m-1]+a[m])/2; }
+
+function circMean(vals){
+  vals = vals.filter(v => v !== null && isFinite(v));
+  if(!vals.length) return null;
+  let s=0,c=0;
+  for(const v of vals){ const a = v/1440*2*Math.PI; s+=Math.sin(a); c+=Math.cos(a); }
+  if(Math.abs(s)<1e-12 && Math.abs(c)<1e-12) return null;
+  let ang = Math.atan2(s,c); if(ang<0) ang += 2*Math.PI;
+  return ang/(2*Math.PI)*1440;
+}
+function circDist(a,b){ if(a==null||b==null) return null;
+  let d = Math.abs(a-b) % 1440; if(d>720) d = 1440-d; return d; }
+function circStd(vals){
+  vals = vals.filter(v => v !== null && isFinite(v));
+  if(!vals.length) return null;
+  const m = circMean(vals); if(m==null) return null;
+  return Math.sqrt(mean(vals.map(v => { const d = circDist(v,m); return d*d; })));
+}
+
+function fmtHM(min){
+  if(min==null || !isFinite(min)) return "–";
+  min = Math.round(min);
+  const h = Math.floor(min/60), m = Math.abs(min%60);
+  if(h<=0) return m+" min";
+  return h+" h "+(m<10?"0":"")+m;
+}
+function fmtClock(min){
+  if(min==null || !isFinite(min)) return "–";
+  min = ((Math.round(min)%1440)+1440)%1440;
+  const h = Math.floor(min/60), m = min%60;
+  return String(h).padStart(2,"0")+":"+String(m).padStart(2,"0");
+}
+function fmtDate(d){
+  return String(d.getDate()).padStart(2,"0")+"."+String(d.getMonth()+1).padStart(2,"0")+".";
+}
+function fmtDateLong(d){
+  return String(d.getDate()).padStart(2,"0")+"."+String(d.getMonth()+1).padStart(2,"0")+"."+d.getFullYear();
+}
+const WD = ["Mo","Di","Mi","Do","Fr","Sa","So"];
+function weekday(d){ return (d.getDay()+6)%7; }
+
+/* ------------------------------------------------------------------ */
+/* Laden                                                               */
+/* ------------------------------------------------------------------ */
+
+let SQL = null;
+async function getSQL(){
+  if(SQL) return SQL;
+  if(typeof initSqlJs !== "function"){
+    throw new Error("SQLite-Bibliothek nicht geladen. Diese Seite braucht beim ersten Öffnen Internet (CDN). Danach funktioniert sie offline.");
+  }
+  SQL = await initSqlJs({ locateFile: f => "https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/" + f });
+  return SQL;
+}
+
+function isZip(buf){
+  const b = new Uint8Array(buf.slice(0,4));
+  return b[0]===0x50 && b[1]===0x4b && (b[2]===0x03 || b[2]===0x05 || b[2]===0x07);
+}
+function isSQLite(buf){
+  const b = new Uint8Array(buf, 0, Math.min(16, buf.byteLength));
+  return String.fromCharCode.apply(null,b).startsWith("SQLite format 3");
+}
+
+let dbMeta = { source:"", note:"" };
+
+async function openBuffer(buf, name){
+  const Lib = await getSQL();
+
+  if(isZip(buf)){
+    if(typeof unzipSync !== "function" && typeof fflate === "undefined"){
+      throw new Error("ZIP erkannt, aber die Entpack-Bibliothek fehlt (Internet beim ersten Öffnen nötig).");
+    }
+    const u8 = new Uint8Array(buf);
+    let files;
+    try { files = fflate.unzipSync(u8); }
+    catch(e){ throw new Error("ZIP ist unvollständig oder beschädigt (" + e.message + ")."); }
+
+    const cands = [];
+    for(const path in files){
+      const data = files[path];
+      if(data.byteLength < 512) continue;
+      if(isSQLite(data.buffer.slice(data.byteOffset, data.byteOffset+data.byteLength))){
+        cands.push({path, data});
+      }
+    }
+    if(!cands.length) throw new Error("In der ZIP steckt keine Gadgetbridge-Datenbank. Es sollten mindestens <code>database/Gadgetbridge</code> und <code>gadgetbridge.json</code> enthalten sein.");
+    cands.sort((a,b) => b.data.byteLength - a.data.byteLength);
+    const pick = cands[0];
+    dbMeta.source = name + " → " + pick.path;
+    dbMeta.note = "aus ZIP entpackt";
+    return new Lib.Database(pick.data);
+  }
+
+  if(!isSQLite(buf)){
+    const head = new Uint8Array(buf,0,Math.min(16,buf.byteLength));
+    const hex = Array.from(head).map(b=>b.toString(16).padStart(2,"0")).join(" ");
+    throw new Error("Das ist keine SQLite-Datenbank (Kopf: " + hex + ").<br>" +
+      "Richtig ist die Datei <code>Gadgetbridge.db</code> aus dem Export oder die ZIP-Sicherung – " +
+      "nicht ein Screenshot, nicht ein Watchface (.hwt) und nicht die CSV.");
+  }
+
+  let db;
+  try { db = new Lib.Database(new Uint8Array(buf)); }
+  catch(e){ throw new Error("Datenbank lässt sich nicht öffnen: " + e.message); }
+  dbMeta.source = name;
+  return db;
+}
+
+/* ------------------------------------------------------------------ */
+/* Daten lesen                                                         */
+/* ------------------------------------------------------------------ */
+
+function q(db, sql){
+  const st = db.prepare(sql);
+  const rows = [];
+  while(st.step()) rows.push(st.getAsObject());
+  st.free();
+  return rows;
+}
+
+function tables(db){
+  const st = db.prepare("SELECT name FROM sqlite_master WHERE type='table'");
+  const s = new Set();
+  while(st.step()) s.add(st.get()[0]);
+  st.free();
+  return s;
+}
+
+function col(rows, names){
+  for(const n of names){
+    for(const r of rows){
+      if(Object.prototype.hasOwnProperty.call(r,n) && r[n] !== null) return n;
+    }
+  }
+  return null;
+}
+
+function nz(v){ return (v===null || v===undefined) ? null : v; }
+
+function buildNights(db, names){
+  if(!names.has(TBL_STATS)) return [];
+  const rows = q(db, "SELECT * FROM " + TBL_STATS + " ORDER BY TIMESTAMP");
+  let stageRows = [];
+  if(names.has(TBL_STAGES)){
+    stageRows = q(db, "SELECT TIMESTAMP, STAGE FROM " + TBL_STAGES + " ORDER BY TIMESTAMP");
+  }
+
+  const nights = [];
+  let si = 0;
+
+  for(const r of rows){
+    let start = Number(r.TIMESTAMP || 0);
+    if(!start) continue;
+    let end = Number(r.WAKEUP_TIME || 0);
+    if(!end || end <= start) end = Number(r.RISING_TIME || 0);
+    if(!end || end <= start){
+      let last = 0;
+      for(const s of stageRows){
+        const t = Number(s.TIMESTAMP);
+        if(t > start && t <= start + 16*3600*1000) last = Math.max(last,t);
+      }
+      if(!last) continue;
+      end = last + 5*60*1000;
+    }
+    const bed = Number(r.BED_TIME || 0);
+    if(bed > 0 && bed >= start - 12*3600*1000 && bed < start) start = bed;
+
+    const inBed = (end-start)/60000;
+    if(inBed < 120 || inBed > 900) continue;
+
+    // Phasen zuordnen (stages sind sortiert)
+    const segs = [];
+    let prev = null;
+    for(const s of stageRows){
+      const t = Number(s.TIMESTAMP);
+      if(t < start) continue;
+      if(t > end) break;
+      if(prev) segs.push([prev.t, t, prev.st]);
+      prev = { t: t, st: Number(s.STAGE) };
+    }
+    if(prev) segs.push([prev.t, end, prev.st]);
+    if(segs.length){
+      segs[0][0] = start;
+      segs[segs.length-1][1] = end;
+    }
+
+    const per = {0:0,1:0,2:0,3:0,4:0,5:0};
+    for(const [a,b,st] of segs){
+      const d = Math.max(0,(b-a)/60000);
+      per[st in per ? st : 0] += d;
+    }
+    const asleep = per[1]+per[5]+per[2]+per[3];
+    const eff = nz(r.SLEEP_EFFICIENCY);
+
+    let tst, awake;
+    if(segs.length && asleep > 0){ tst = asleep; awake = per[4]; }
+    else if(eff){ tst = inBed*(Number(eff)/100); awake = inBed - tst; }
+    else { tst = null; awake = null; }
+
+    const startD = new Date(start);
+    const endD = new Date(end);
+    const midD = new Date(start + Math.floor((end-start)/2));
+    const day = new Date(endD.getFullYear(), endD.getMonth(), endD.getDate());
+    const midMin = midD.getHours()*60 + midD.getMinutes() + midD.getSeconds()/60;
+
+    nights.push({
+      date: day, start: startD, end: endD, startMS: start, endMS: end,
+      inBed: inBed, tst: tst, eff: tst ? tst/inBed*100 : null,
+      latency: nz(r.SLEEP_LATENCY), score: nz(r.SLEEP_SCORE),
+      deep: segs.length ? per[3] : null,
+      light: segs.length ? (per[1]+per[5]) : null,
+      rem: segs.length ? per[2] : null,
+      awake: segs.length ? per[4] : awake,
+      wakeCount: nz(r.WAKE_COUNT),
+      minHR: nz(r.MIN_HEART_RATE), avgHR: nz(r.AVG_HEART_RATE),
+      hrv: nz(r.AVG_HRV), spo2: nz(r.AVG_OXYGEN_SATURATION),
+      breath: nz(r.AVG_BREATH_RATE),
+      midMin: midMin,
+      bedMin: startD.getHours()*60 + startD.getMinutes(),
+      wakeMin: endD.getHours()*60 + endD.getMinutes(),
+      segs: segs, hasStages: segs.length > 0
+    });
+  }
+  return nights;
+}
+
+function buildActivity(db, names){
+  const days = new Map();
+  if(names.has(TBL_ACTIVITY)){
+    const rows = q(db, "SELECT TIMESTAMP, STEPS, CALORIES, HEART_RATE, RESTING_HEART_RATE, SPO FROM " + TBL_ACTIVITY);
+    for(const r of rows){
+      const t = Number(r.TIMESTAMP); if(!t) continue;
+      const d = new Date(t);
+      const key = d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");
+      let e = days.get(key);
+      if(!e){ e = { date:new Date(d.getFullYear(),d.getMonth(),d.getDate()), steps:0, cal:0, hr:[], rhr:[], spo:[], key:key }; days.set(key,e); }
+      e.steps += Math.max(0, Number(r.STEPS||0));
+      e.cal   += Math.max(0, Number(r.CALORIES||0));
+      const hr = Number(r.HEART_RATE||0);  if(hr>25) e.hr.push(hr);
+      const rh = Number(r.RESTING_HEART_RATE||0); if(rh>25) e.rhr.push(rh);
+      const sp = Number(r.SPO||0); if(sp>50) e.spo.push(sp);
+    }
+  }
+  return Array.from(days.values()).sort((a,b)=>a.date-b.date);
+}
+
+function buildWorkouts(db, names){
+  if(!names.has(TBL_WORKOUT)) return [];
+  const rows = q(db, "SELECT * FROM " + TBL_WORKOUT + " ORDER BY START_TIMESTAMP DESC LIMIT 200");
+  return rows.map(r => {
+    let start = Number(r.START_TIMESTAMP||0);
+    let dur = nz(r.DURATION);
+    if(!dur && start && r.END_TIMESTAMP) dur = Number(r.END_TIMESTAMP) - start;
+    return {
+      start: start ? new Date(start) : null,
+      duration: dur,
+      distance: nz(r.DISTANCE), calories: nz(r.CALORIES),
+      type: nz(r.TYPE), steps: nz(r.STEP_COUNT), hrMax: nz(r.MAX_HEART_RATE_PEAK)
+    };
+  }).filter(w => w.start && !isNaN(w.start));
+}
+
+/* ------------------------------------------------------------------ */
+/* Kennzahlen                                                          */
+/* ------------------------------------------------------------------ */
+
+function analyze(nights, activity){
+  const res = {};
+  if(!nights.length) return res;
+  const last = nights[nights.length-1];
+  const week = nights.slice(-7);
+  const month = nights.slice(-28);
+
+  res.last = last;
+  res.count = nights.length;
+  res.firstDay = nights[0].date;
+  res.lastDay = last.date;
+  res.tst7 = mean(week.map(n=>n.tst));
+  res.tst28 = mean(month.map(n=>n.tst));
+  res.eff7 = mean(week.map(n=>n.eff));
+  res.midMean = circMean(month.map(n=>n.midMin));
+  res.midStd  = circStd(month.map(n=>n.midMin));
+  res.regularity = res.midStd==null ? null : 100*Math.exp(-res.midStd/60);
+  res.bedStd  = circStd(month.map(n=>n.bedMin));
+  res.wakeStd = circStd(month.map(n=>n.wakeMin));
+
+  const wk = month.filter(n=>weekday(n.date)<5).map(n=>n.midMin);
+  const we = month.filter(n=>weekday(n.date)>=5).map(n=>n.midMin);
+  const mw = circMean(wk), me = circMean(we);
+  res.jetlag = (mw==null||me==null) ? null : circDist(mw,me);
+  const bwk = circMean(month.filter(n=>weekday(n.date)<5).map(n=>n.bedMin));
+  const bwe = circMean(month.filter(n=>weekday(n.date)>=5).map(n=>n.bedMin));
+  res.jetlagBed = (bwk==null||bwe==null) ? null : circDist(bwk,bwe);
+
+  const recent = nights.slice(-14);
+  res.debt = mean(recent.map(n => Math.max(0, TARGET_MIN - (n.tst || TARGET_MIN))));
+  res.deepShare = mean(month.filter(n=>n.tst && n.deep!=null).map(n=>n.deep/n.tst*100));
+  res.remShare  = mean(month.filter(n=>n.tst && n.rem !=null).map(n=>n.rem /n.tst*100));
+  res.awakeMean = mean(month.map(n=>n.awake));
+  res.wakeCount = mean(month.map(n=>n.wakeCount));
+
+  res.byWeekday = [];
+  for(let i=0;i<7;i++){
+    const v = month.filter(n=>weekday(n.date)===i && n.tst).map(n=>n.tst);
+    res.byWeekday.push([WD[i], mean(v), v.length]);
+  }
+
+  res.nights14 = nights.slice(-14);
+  res.stepsDays = activity.slice(-28);
+  res.stepsMean = mean(res.stepsDays.map(a=>a.steps));
+  res.stepsBest = res.stepsDays.length ? res.stepsDays.reduce((a,b)=>b.steps>a.steps?b:a) : null;
+  res.rhrMean = mean(res.stepsDays.map(a=>median(a.rhr)).filter(v=>v));
+  res.hrMean  = mean(res.stepsDays.map(a=>median(a.hr)).filter(v=>v));
+  res.spoMean = mean(res.stepsDays.map(a=>median(a.spo)).filter(v=>v));
+
+  res.stageTotals = {1:0,3:0,2:0,4:0,5:0};
+  for(const n of month) for(const [a,b,st] of n.segs) res.stageTotals[st] = (res.stageTotals[st]||0)+(b-a)/60000;
+
+  return res;
+}
+
+/* ------------------------------------------------------------------ */
+/* SVG                                                                 */
+/* ------------------------------------------------------------------ */
+
+function svgOpen(w,h,cls){
+  return '<svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">';
+}
+function t(x,y,s,size,fill,anchor,weight){
+  return '<text x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" font-size="'+(size||10)+'" fill="'+(fill||"#8b93a1")+
+         '" text-anchor="'+(anchor||"start")+'" font-weight="'+(weight||"400")+
+         '" font-family="system-ui,sans-serif">'+esc(s)+'</text>';
+}
+function bar(x,y,w,h,fill,rx){
+  return '<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+Math.max(0.6,w).toFixed(1)+
+         '" height="'+Math.max(0.6,h).toFixed(1)+'" fill="'+fill+'" rx="'+(rx==null?2:rx)+'"/>';
+}
+
+function xAct(min){
+  let m = min; if(m < WINDOW_START) m += 1440;
+  return (m - WINDOW_START) / WINDOW_LEN;
+}
+
+function actogram(nights){
+  const W=720, rowH=15, padL=44, padT=18, padR=8;
+  const plotW = W-padL-padR;
+  const H = padT + nights.length*rowH + 18;
+  let s = svgOpen(W,H);
+  // Stundenraster
+  for(let h=18; h<=38; h+=2){
+    const m = h*60, x = padL + xAct(m%1440)*plotW;
+    s += '<line x1="'+x.toFixed(1)+'" y1="'+padT+'" x2="'+x.toFixed(1)+'" y2="'+(padT+nights.length*rowH)+'" stroke="#252b35" stroke-width="1"/>';
+    s += t(x, padT-6, String((h%24)).padStart(2,"0"), 9, "#8b93a1", "middle");
+  }
+  nights.forEach((n,i)=>{
+    const y = padT + i*rowH + 2;
+    const h = rowH-4;
+    if(n.segs && n.segs.length){
+      for(const [a,b,st] of n.segs){
+        const da = new Date(a), db2 = new Date(b);
+        const ma = da.getHours()*60+da.getMinutes(), mb = db2.getHours()*60+db2.getMinutes();
+        const x0 = padL + xAct(ma)*plotW, x1 = padL + xAct(mb)*plotW;
+        const w = Math.max(0.7, (x1-x0));
+        s += bar(x0, y, w, h, (STAGES[st]||STAGES[0])[1], 1);
+      }
+    } else {
+      const x0 = padL + xAct(n.bedMin)*plotW;
+      let x1 = padL + xAct(n.wakeMin)*plotW;
+      if(x1 < x0) x1 += plotW;
+      s += bar(x0, y, x1-x0, h, "#3a4250", 1);
+    }
+    if(i % 7 === 0) s += t(padL-6, y+h/2+3, fmtDate(n.date), 9, "#8b93a1", "end");
+  });
+  s += "</svg>";
+  return s;
+}
+
+function hypnogram(night){
+  const W=720,H=132, padL=44, padT=12, padR=10, padB=18;
+  const plotW=W-padL-padR, plotH=H-padT-padB;
+  let s = svgOpen(W,H);
+  const levels=["Tief","Leicht","REM","Wach"];
+  levels.forEach((nm,i)=>{
+    const y = padT + plotH*i/3;
+    s += '<line x1="'+padL+'" y1="'+y.toFixed(1)+'" x2="'+(W-padR)+'" y2="'+y.toFixed(1)+'" stroke="#252b35" stroke-width="1"/>';
+    s += t(padL-6, y+3, nm, 9, "#8b93a1", "end");
+  });
+  const t0 = night.startMS, t1 = night.endMS, span = t1-t0;
+  const X = ms => padL + (ms-t0)/span*plotW;
+  const segs = night.segs.length ? night.segs : [[t0,t1,1]];
+  let prevY = null;
+  for(const [a,b,st] of segs){
+    const info = STAGES[st] || STAGES[0];
+    const y = padT + plotH*(info[2]/3);
+    const x0 = X(a), w = Math.max(1, X(b)-x0);
+    s += bar(x0, y-3, w, 6, info[1], 1);
+    if(prevY !== null && Math.abs(prevY-y) > 0.5){
+      s += '<line x1="'+x0.toFixed(1)+'" y1="'+prevY.toFixed(1)+'" x2="'+x0.toFixed(1)+'" y2="'+y.toFixed(1)+'" stroke="'+info[1]+'" stroke-width="1.2" opacity=".55"/>';
+    }
+    prevY = y;
+  }
+  // Zeitachse
+  for(let k=0;k<=4;k++){
+    const ms = t0 + span*k/4, d = new Date(ms);
+    const x = X(ms);
+    s += t(x, H-5, fmtClock(d.getHours()*60+d.getMinutes()), 9, "#8b93a1", k===0?"start":(k===4?"end":"middle"));
+  }
+  s += "</svg>";
+  return s;
+}
+
+function barChart(values, labels, opts){
+  opts = opts || {};
+  const W=720,H=opts.height||180, padL=44, padT=12, padR=10, padB=20;
+  const plotW=W-padL-padR, plotH=H-padT-padB;
+  const maxV = Math.max(opts.minMax||1, ...values.filter(v=>v!=null));
+  let s = svgOpen(W,H);
+  const n = values.length, bw = plotW/Math.max(1,n);
+  for(let k=0;k<=3;k++){
+    const y = padT + plotH*(1-k/3);
+    s += '<line x1="'+padL+'" y1="'+y.toFixed(1)+'" x2="'+(W-padR)+'" y2="'+y.toFixed(1)+'" stroke="#252b35"/>';
+    s += t(padL-6, y+3, Math.round(maxV*k/3), 9, "#8b93a1", "end");
+  }
+  if(opts.target){
+    const y = padT + plotH*(1-opts.target/maxV);
+    s += '<line x1="'+padL+'" y1="'+y.toFixed(1)+'" x2="'+(W-padR)+'" y2="'+y.toFixed(1)+'" stroke="#54c08a" stroke-dasharray="4 3" stroke-width="1"/>';
+  }
+  values.forEach((v,i)=>{
+    if(v==null) return;
+    const h = plotH*(v/maxV);
+    const x = padL + i*bw + bw*0.15;
+    s += bar(x, padT+plotH-h, bw*0.7, h, opts.color||"#59a5f5", 2);
+  });
+  (labels||[]).forEach((lab,i)=>{
+    if(lab==null) return;
+    s += t(padL + i*bw + bw/2, H-6, lab, 8, "#8b93a1", "middle");
+  });
+  s += "</svg>";
+  return s;
+}
+
+function lineChart(values, labels, opts){
+  opts = opts||{};
+  const W=720,H=opts.height||160, padL=44, padT=12, padR=10, padB=20;
+  const plotW=W-padL-padR, plotH=H-padT-padB;
+  const vals = values.filter(v=>v!=null);
+  if(!vals.length) return '<div class="note">keine Daten</div>';
+  const lo = opts.min!=null?opts.min:Math.min(...vals)*0.95;
+  const hi = opts.max!=null?opts.max:Math.max(...vals)*1.05;
+  const n = values.length;
+  const X = i => padL + (n<=1?plotW/2:(i/(n-1))*plotW);
+  const Y = v => padT + plotH*(1-(v-lo)/Math.max(1e-9,hi-lo));
+  let s = svgOpen(W,H);
+  for(let k=0;k<=3;k++){
+    const y = padT+plotH*(1-k/3), v = lo+(hi-lo)*k/3;
+    s += '<line x1="'+padL+'" y1="'+y.toFixed(1)+'" x2="'+(W-padR)+'" y2="'+y.toFixed(1)+'" stroke="#252b35"/>';
+    s += t(padL-6, y+3, Math.round(v), 9, "#8b93a1", "end");
+  }
+  let d = "";
+  values.forEach((v,i)=>{ if(v==null) return; d += (d?" L":"M")+X(i).toFixed(1)+" "+Y(v).toFixed(1); });
+  s += '<path d="'+d+'" fill="none" stroke="'+(opts.color||"#59a5f5")+'" stroke-width="2" stroke-linejoin="round"/>';
+  values.forEach((v,i)=>{ if(v==null) return;
+    s += '<circle cx="'+X(i).toFixed(1)+'" cy="'+Y(v).toFixed(1)+'" r="2.2" fill="'+(opts.color||"#59a5f5")+'"/>'; });
+  (labels||[]).forEach((lab,i)=>{ if(lab==null) return; s += t(X(i), H-6, lab, 8, "#8b93a1", "middle"); });
+  s += "</svg>";
+  return s;
+}
+
+/* ------------------------------------------------------------------ */
+/* Bericht                                                             */
+/* ------------------------------------------------------------------ */
+
+function kpi(v,l,n){
+  return '<div class="kpi"><div class="l">'+esc(l)+'</div><div class="v">'+v+'</div>'+
+         (n?'<div class="n">'+esc(n)+'</div>':'')+'</div>';
+}
+
+function report(nights, activity, workouts, db){
+  const res = analyze(nights, activity);
+  const out = [];
+  const last = res.last;
+
+  const nightsLbl = nights.slice(-14).map(n=>fmtDate(n.date).slice(0,2));
+  const nightsVal = nights.slice(-14).map(n=>n.tst?n.tst/60:null);
+
+  if(!nights.length){
+    out.push('<div class="card"><h2>Keine Schlafdaten gefunden</h2>'+
+      '<div class="note">Die Datenbank ist lesbar, enthält aber keine ' + TBL_STATS + '-Zeilen.</div>'+
+      '<div class="note">Mögliche Gründe: Gadgetbridge hat noch nicht synchronisiert, oder es ist eine falsche Datei. '+
+      'In Gadgetbridge: Gerät öffnen → synchronisieren, danach neu exportieren.</div></div>');
+  } else {
+    out.push('<div class="card"><div class="sub" style="margin:0 0 8px">'+
+      esc(dbMeta.source) + ' · ' + res.count + ' Nächte · ' + fmtDateLong(res.firstDay) + ' bis ' + fmtDateLong(res.lastDay) +
+      (last.hasStages ? ' · <span class="ok">mit Schlafphasen</span>' : ' · <span class="err">ohne Schlafphasen</span>') +
+      '</div><div class="grid">'+
+      kpi(fmtHM(last.tst),'Letzte Nacht', fmtClock(last.bedMin)+'–'+fmtClock(last.wakeMin)) +
+      kpi(last.eff?last.eff.toFixed(0)+' %':'–','Effizienz','Anteil Schlaf im Bett') +
+      kpi(fmtHM(res.tst7),'Ø 7 Nächte','Ziel 8 h') +
+      kpi(fmtHM(res.tst28),'Ø 28 Nächte','Ziel 8 h') +
+      kpi(res.regularity!=null?res.regularity.toFixed(0):'–','Regelmäßigkeit','0–100, höher besser') +
+      kpi(res.jetlag!=null?Math.round(res.jetlag)+' min':'–','Social Jetlag','Schlafmitte Wochenende') +
+      kpi(res.debt!=null?fmtHM(res.debt):'–','Schlafschuld','fehlend pro Nacht, 14 N') +
+      kpi(fmtHM(res.stepsMean),'Schritte Ø','letzte 28 Tage') +
+      '</div></div>');
+
+    // Actogramm
+    const act = actogram(nights.slice(-28));
+    out.push('<div class="card"><h2>Aktogramm – 28 Nächte</h2>'+act+
+      '<div class="legend">'+
+      Object.keys(STAGES).filter(k=>k!=="0").map(k=>'<span><i style="background:'+STAGES[k][1]+'"></i>'+STAGES[k][0]+'</span>').join("")+
+      '</div><div class="note">Jede Zeile eine Nacht, links das Zubettgehen, rechts das Aufwachen. Gleichmäßige Kanten links = stabiler Rhythmus.</div></div>');
+
+    // Hypnogramm
+    const withStages = nights.filter(n=>n.hasStages).slice(-1)[0];
+    if(withStages){
+      out.push('<div class="card"><h2>Nachtschlaf – '+fmtDateLong(withStages.date)+'</h2>'+hypnogram(withStages)+
+        '<div class="legend">'+
+        '<span><i style="background:#2f6fdb"></i>Tief '+fmtHM(withStages.deep)+'</span>'+
+        '<span><i style="background:#59a5f5"></i>Leicht '+fmtHM(withStages.light)+'</span>'+
+        '<span><i style="background:#9a6ff0"></i>REM '+fmtHM(withStages.rem)+'</span>'+
+        '<span><i style="background:#e0644a"></i>Wach '+fmtHM(withStages.awake)+'</span>'+
+        '</div></div>');
+    }
+
+    // Dauer
+    out.push('<div class="card"><h2>Schlafdauer – letzte 14 Nächte</h2>'+
+      barChart(nightsVal, nightsLbl, {height:170, color:"#59a5f5", target:8, minMax:10})+
+      '<div class="note">Grün gestrichelt: 8-h-Ziel. Einheiten in Stunden.</div></div>');
+
+    // Wochentage
+    out.push('<div class="card"><h2>Pro Wochentag</h2>'+
+      barChart(res.byWeekday.map(w=>w[1]/60), res.byWeekday.map(w=>w[0]), {height:150, color:"#9a6ff0", target:8, minMax:10})+
+      '<div class="note">Am Wochenende länger schlafen bedeutet meist: unter der Woche fehlt Schlaf.</div></div>');
+  }
+
+  // Schlafarchitektur
+  if(nights.length && res.deepShare!=null){
+    out.push('<div class="card"><h2>Schlafarchitektur</h2><div class="grid">'+
+      kpi(res.deepShare.toFixed(0)+' %','Tiefschlaf','normal 13–23 %')+
+      kpi(res.remShare!=null?res.remShare.toFixed(0)+' %':'–','REM','normal 20–25 %')+
+      kpi(res.awakeMean!=null?fmtHM(res.awakeMean):'–','Wach im Bett','pro Nacht')+
+      kpi(res.wakeCount!=null?res.wakeCount.toFixed(1):'–','Unterbrechungen','pro Nacht')+
+      '</div></div>');
+  }
+
+  // Aktivität
+  if(res.stepsDays && res.stepsDays.length){
+    const lbl = res.stepsDays.map(a=>fmtDate(a.date).slice(0,2));
+    out.push('<div class="card"><h2>Bewegung – letzte 28 Tage</h2>'+
+      lineChart(res.stepsDays.map(a=>a.steps), lbl, {color:"#54c08a", height:160, min:0})+
+      '<div class="note">Ø '+Math.round(res.stepsMean)+' Schritte/Tag'+
+      (res.stepsBest?' · bester Tag '+fmtDateLong(res.stepsBest.date)+' mit '+Math.round(res.stepsBest.steps):'')+
+      '</div></div>');
+
+    if(res.rhrMean){
+      out.push('<div class="card"><h2>Ruhepuls &amp; SpO₂</h2>'+
+        lineChart(res.stepsDays.map(a=>a.rhr.length?median(a.rhr):null), lbl, {color:"#e0644a", height:150, min:40})+
+        '<div class="note">Ø Ruhepuls '+res.rhrMean.toFixed(0)+' bpm'+
+        (res.spoMean?' · Ø SpO₂ '+res.spoMean.toFixed(1)+' %':'')+
+        ' · Ruhepuls fällt bei guter Erholung, steigt bei Stress, Alkohol, Krankheit.</div></div>');
+    }
+  }
+
+  // Workouts
+  if(workouts.length){
+    const rows = workouts.slice(0,20).map(w=>{
+      return '<tr><td>'+fmtDate(w.start)+' '+fmtClock(w.start.getHours()*60+w.start.getMinutes())+'</td>'+
+        '<td class="num">'+(w.duration?fmtHM(w.duration/60):'–')+'</td>'+
+        '<td class="num">'+(w.distance?(Number(w.distance)/1000).toFixed(2)+' km':'–')+'</td>'+
+        '<td class="num">'+(w.calories?Math.round(w.calories)+' kcal':'–')+'</td>'+
+        '<td class="num">'+(w.hrMax?Math.round(w.hrMax):'–')+'</td></tr>';
+    }).join("");
+    out.push('<div class="card"><h2>Trainings</h2><div class="scroll"><table>'+
+      '<tr><th>Start</th><th>Dauer</th><th>Distanz</th><th>Energie</th><th>HF max</th></tr>'+rows+'</table></div></div>');
+  }
+
+  // Diagnose
+  out.push('<div class="card"><details><summary>Diagnose der Datei</summary>'+
+    '<pre>'+esc(diagText(nights, db))+'</pre></details></div>');
+
+  // Aktionen
+  out.push('<div class="card"><h2>Weitergeben</h2>'+
+    '<div class="row"><button class="primary" id="copySummary">Zusammenfassung kopieren</button>'+
+    '<button id="downloadJSON">Daten als JSON</button></div>'+
+    '<div class="note">„Zusammenfassung kopieren“ erzeugt wenige Zeilen Text – das lässt sich hier im Chat als Nachricht einfügen, ohne Datei.</div></div>');
+
+  return out.join("");
+}
+
+let lastReport = { nights:[], activity:[], workouts:[] };
+
+function summaryText(){
+  const n = lastReport.nights;
+  if(!n.length) return "FitLab: keine Schlafdaten in der Datei.";
+  const res = analyze(n, lastReport.activity);
+  const last = res.last;
+  const L = [];
+  L.push("FitLab – "+ (dbMeta.source.split("/").pop()||"Datenbank"));
+  L.push("Nächte: "+res.count+" ("+fmtDateLong(res.firstDay)+" .. "+fmtDateLong(res.lastDay)+")"+
+         (last.hasStages?" mit Schlafphasen":" ohne Schlafphasen"));
+  L.push("Letzte Nacht: "+fmtDateLong(last.date)+" "+fmtClock(last.bedMin)+"–"+fmtClock(last.wakeMin)+
+         ", im Bett "+fmtHM(last.inBed)+", Schlaf "+fmtHM(last.tst)+
+         (last.eff?", Effizienz "+last.eff.toFixed(0)+"%":"")+
+         (last.deep!=null?", Tief "+fmtHM(last.deep)+", REM "+fmtHM(last.rem):""));
+  L.push("Ø 7 Nächte: "+fmtHM(res.tst7)+" | Ø 28 Nächte: "+fmtHM(res.tst28));
+  L.push("Regelmäßigkeit: "+(res.regularity!=null?res.regularity.toFixed(0)+"/100":"–")+
+         " (Streuung "+(res.midStd!=null?Math.round(res.midStd)+" min":"–")+
+         ", mittlere Schlafmitte "+fmtClock(res.midMean)+")");
+  L.push("Social Jetlag: "+(res.jetlag!=null?Math.round(res.jetlag)+" min":"–")+
+         " | Schlafschuld: "+(res.debt!=null?fmtHM(res.debt)+"/Nacht":"–"));
+  if(res.deepShare!=null) L.push("Tiefschlaf "+(res.deepShare||0).toFixed(0)+" %, REM "+(res.remShare||0).toFixed(0)+" %");
+  if(res.stepsMean) L.push("Schritte Ø "+(res.stepsMean?Math.round(res.stepsMean):"–")+
+    (res.rhrMean?" | Ruhepuls Ø "+res.rhrMean.toFixed(0)+" bpm":"")+
+    (res.spoMean?" | SpO2 Ø "+res.spoMean.toFixed(1)+" %":""));
+  return L.join("\n");
+}
+
+function diagText(nights, db){
+  const L = [];
+  L.push("Quelle: "+dbMeta.source);
+  try{
+    const names = tables(db);
+    L.push("Tabellen: "+names.size);
+    const st = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name");
+    const list = [];
+    while(st.step()) list.push(st.get()[0]);
+    st.free();
+    const interesting = list.filter(x=>/SLEEP|ACTIVITY|WORKOUT|HRV|STEP|HEART/.test(x));
+    for(const nm of interesting){
+      const c = q(db,"SELECT count(*) AS c FROM \""+nm+"\"").pop();
+      L.push("  "+nm+": "+(c?c.c:0)+" Zeilen");
+    }
+    L.push("Phasen: "+ (nights.filter(n=>n.hasStages).length)+" von "+nights.length+" Nächten auswertbar");
+  }catch(e){ L.push("Fehler beim Lesen: "+e.message); }
+  return L.join("\n");
+}
+
+/* ------------------------------------------------------------------ */
+/* Ablauf                                                              */
+/* ------------------------------------------------------------------ */
+
+async function handleFile(f){
+  const out = $("#out");
+  out.innerHTML = '<div class="card"><span class="spin"></span> Datei wird gelesen …</div>';
+  try{
+    const buf = await f.arrayBuffer();
+    dbMeta = { source: f.name, note: (buf.byteLength/1048576).toFixed(1)+" MB" };
+    const db = await openBuffer(buf, f.name);
+    const names = tables(db);
+    const nights = buildNights(db, names);
+    const activity = buildActivity(db, names);
+    const workouts = buildWorkouts(db, names);
+    lastReport = { nights, activity, workouts };
+    out.innerHTML = report(nights, activity, workouts, db);
+    $("#dropTitle").textContent = f.name;
+    $("#dropHint").textContent = "andere Datei wählen";
+    try{ localStorage.setItem("fitlab.last", f.name); }catch(e){}
+    const cs = $("#copySummary");
+    if(cs) cs.onclick = async () => {
+      const txt = summaryText();
+      try{ await navigator.clipboard.writeText(txt); cs.textContent = "kopiert ✓"; }
+      catch(e){ window.prompt("Kopieren:", txt); }
+      setTimeout(()=>cs.textContent="Zusammenfassung kopieren", 2000);
+    };
+    const dj = $("#downloadJSON");
+    if(dj) dj.onclick = () => {
+      const payload = {
+        quelle: dbMeta.source,
+        naechte: lastReport.nights.map(n=>({
+          datum: n.date.toISOString().slice(0,10),
+          zubett: fmtClock(n.bedMin), auf: fmtClock(n.wakeMin),
+          im_bett_min: Math.round(n.inBed), schlaf_min: Math.round(n.tst||0),
+          effizienz: n.eff?Math.round(n.eff):null,
+          tief_min: n.deep!=null?Math.round(n.deep):null,
+          rem_min: n.rem!=null?Math.round(n.rem):null,
+          wach_min: n.awake!=null?Math.round(n.awake):null
+        })),
+        zusammenfassung: summaryText()
+      };
+      const blob = new Blob([JSON.stringify(payload,null,1)], {type:"application/json"});
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "fitlab.json";
+      a.click();
+    };
+    window.scrollTo({top:0,behavior:"smooth"});
+  }catch(e){
+    out.innerHTML = '<div class="card"><h2 class="err">Das hat nicht geklappt</h2>'+
+      '<div class="note">'+ (e && e.message ? e.message : String(e)) +'</div></div>';
+  }
+}
+
+function wire(){
+  const drop = $("#drop");
+  const file = $("#file");
+  $("#pick").onclick = () => file.click();
+  drop.onclick = e => { if(e.target.id!=="pick") file.click(); };
+  file.onchange = () => { if(file.files && file.files[0]) handleFile(file.files[0]); };
+  ["dragenter","dragover"].forEach(ev => drop.addEventListener(ev, e => {
+    e.preventDefault(); drop.classList.add("on"); }));
+  ["dragleave","drop"].forEach(ev => drop.addEventListener(ev, e => {
+    e.preventDefault(); drop.classList.remove("on"); }));
+  drop.addEventListener("drop", e => {
+    if(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+  });
+}
+wire();
+</script>
+</body>
+</html>
