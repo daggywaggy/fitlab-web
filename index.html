@@ -84,8 +84,10 @@ Alles läuft in diesem Browser – die Datei wird nicht hochgeladen.</div>
 
 <footer id="foot">FitLab – offline, ohne Konto, ohne Cloud.</footer>
 
-<script src="https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js"></script>
+<!-- Bibliotheken liegen neben dieser Datei (App: im APK, Web: im Repo).
+     Fehlen sie, laedt ensureLibs() sie vom CDN nach. -->
+<script src="sql-wasm.js" onload="window.__fitLocalSql=1"></script>
+<script src="fflate.js" onload="window.__fitLocalZip=1"></script>
 <script>
 "use strict";
 
@@ -176,12 +178,15 @@ function loadScript(src){
   });
 }
 
+const CDN_SQL = "https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/";
+const CDN_ZIP = "https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js";
+
 async function ensureLibs(){
   if(typeof initSqlJs !== "function"){
-    try { await loadScript("https://unpkg.com/sql.js@1.10.3/dist/sql-wasm.js"); } catch(e){}
+    try { await loadScript(CDN_SQL + "sql-wasm.js"); } catch(e){}
   }
   if(typeof fflate === "undefined"){
-    try { await loadScript("https://unpkg.com/fflate@0.8.2/umd/index.js"); } catch(e){}
+    try { await loadScript(CDN_ZIP); } catch(e){}
   }
 }
 
@@ -190,9 +195,11 @@ async function getSQL(){
   if(SQL) return SQL;
   await ensureLibs();
   if(typeof initSqlJs !== "function"){
-    throw new Error("SQLite-Bibliothek nicht geladen. Diese Seite braucht beim ersten Öffnen Internet (CDN). Danach funktioniert sie offline.");
+    throw new Error("SQLite-Bibliothek nicht geladen. Ohne lokale Datei braucht diese Seite beim ersten Öffnen Internet (CDN).");
   }
-  SQL = await initSqlJs({ locateFile: f => "https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/" + f });
+  // Lokal mitgelieferte wasm bevorzugen, sonst vom CDN - nie gemischt.
+  const base = window.__fitLocalSql ? "" : CDN_SQL;
+  SQL = await initSqlJs({ locateFile: f => base + f });
   return SQL;
 }
 
