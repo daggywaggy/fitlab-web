@@ -856,6 +856,22 @@ function wire(){
   });
 }
 wire();
+
+/* Von der Android-App aufgerufen, wenn sie eine Datei per "Oeffnen mit"
+   bekommt (Dateimanager -> Gadgetbridge.db -> FitLab). base64, weil
+   evaluateJavascript nur Text uebertraegt. Im Browser ungenutzt. */
+window.fitlabOpen = function(name, b64){
+  try{
+    const bin = atob(b64);
+    const arr = new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++) arr[i] = bin.charCodeAt(i);
+    handleFile(new File([arr], name || "export.db"));
+  }catch(e){
+    const out = $("#out");
+    out.innerHTML = '<div class="card"><h2 class="err">Datei nicht lesbar</h2>'+
+      '<div class="note">'+esc(e && e.message ? e.message : String(e))+'</div></div>';
+  }
+};
 </script>
 </body>
 </html>
