@@ -859,18 +859,40 @@ wire();
 
 /* Von der Android-App aufgerufen, wenn sie eine Datei per "Oeffnen mit"
    bekommt (Dateimanager -> Gadgetbridge.db -> FitLab). base64, weil
-   evaluateJavascript nur Text uebertraegt. Im Browser ungenutzt. */
-window.fitlabOpen = function(name, b64){
-  try{
-    const bin = atob(b64);
-    const arr = new Uint8Array(bin.length);
-    for(let i=0;i<bin.length;i++) arr[i] = bin.charCodeAt(i);
-    handleFile(new File([arr], name || "export.db"));
-  }catch(e){
+   evaluateJavascript nur Text uebertraegt. Im Browser ungenutzt.
+
+   Die App schickt die Datei in Stuecken (fitlabChunk, letztes Stueck mit
+   last=true). Grund: eine 20-MB-Datenbank als ein einziger 27-MB-String
+   durch die JS-Bridge zu schieben kostet kurzzeitig ein Vielfaches an
+   Speicher und bricht auf schwaecheren Geraeten gern ab. fitlabOpen bleibt
+   fuer einzelne Aufrufe (und Tests) erhalten. */
+window.fitlabChunk = (function(){
+  let parts = [], total = 0, name = "";
+  function fail(e){
+    parts = []; total = 0;
     const out = $("#out");
     out.innerHTML = '<div class="card"><h2 class="err">Datei nicht lesbar</h2>'+
       '<div class="note">'+esc(e && e.message ? e.message : String(e))+'</div></div>';
   }
+  return function(chunkName, b64, last){
+    try{
+      if(chunkName) name = chunkName;
+      const bin = atob(b64);
+      const u8 = new Uint8Array(bin.length);
+      for(let i=0;i<bin.length;i++) u8[i] = bin.charCodeAt(i);
+      parts.push(u8); total += u8.length;
+      if(!last) return;
+      const all = new Uint8Array(total);
+      let o = 0;
+      for(const p of parts){ all.set(p, o); o += p.length; }
+      parts = []; total = 0;
+      handleFile({ name: name || "export.db", arrayBuffer: async () => all.buffer });
+    }catch(e){ fail(e); }
+  };
+})();
+
+window.fitlabOpen = function(name, b64){
+  window.fitlabChunk(name, b64, true);
 };
 </script>
 </body>
